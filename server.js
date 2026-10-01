@@ -19,7 +19,7 @@ const FRAME = 4;   // bytes in one stereo frame (16-bit left, 16-bit right)
 
 // source: the TimesGate controller. outDir: where recordings go. autoStop: stop when the arm lifts,
 // which is quietS seconds below quietDb after music has been heard.
-let conf = { source: 'http://192.168.1.128:8080', outDir: 'G:\\VinylDigitizer', autoStop: true, quietDb: -65, quietS: 8 };
+let conf = { source: 'http://192.168.1.128:8080', outDir: 'G:\\VinylDigitizer', autoStop: true, quietDb: -65, quietS: 8, mp3: true };
 try { conf = { ...conf, ...JSON.parse(fs.readFileSync(CONF_FILE, 'utf8')) }; } catch {}
 const saveConf = () => { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(CONF_FILE, JSON.stringify(conf, null, 2)); };
 const log = (...a) => console.log(new Date().toLocaleTimeString(), ...a);
@@ -246,9 +246,10 @@ function runFfmpeg(args) {
   });
 }
 
-// body: { album: { album, artist, year, … }, tracks: [{ title, artist, pos, number, start, end }], rpm, correct }
+// body: { album: { album, artist, year, … }, tracks: [{ title, artist, pos, number, start, end }], rpm, correct, mp3 }
 // Cuts each track out of the raw recording (which is never changed), corrects the speed if asked,
-// and saves it tagged, in <outDir>/<artist>/<album (year)>/. Saving again replaces the earlier files.
+// and saves it tagged, in <outDir>/FLAC/<artist>/<album (year)>/, with an MP3 copy (LAME V0, about
+// 245 kbit/s) under <outDir>/MP3/ if asked. Saving again replaces the earlier files.
 async function saveTracks(id, body) {
   const info = infoOf(id);
   if (!info) throw fail(404, 'That recording isn\'t there.');
@@ -269,8 +270,10 @@ async function saveTracks(id, body) {
   saving = id;
   try {
     const year = /^\d{4}$/.test(String(a.year || '')) ? String(a.year) : '';
-    const dir = path.join(conf.outDir, fileSafe(a.artist), fileSafe(a.album) + (year ? ` (${year})` : ''));
+    const folder = path.join(fileSafe(a.artist), fileSafe(a.album) + (year ? ` (${year})` : ''));
+    const dir = path.join(conf.outDir, 'FLAC', folder), mp3Dir = body.mp3 ? path.join(conf.outDir, 'MP3', folder) : null;
     fs.mkdirSync(dir, { recursive: true });
+    if (mp3Dir) fs.mkdirSync(mp3Dir, { recursive: true });
     const cover = await fetchCover(a.cover, dir);
     const width = Math.max(2, ...tracks.map(t => String(t.number || 0).length));
     // Slowing a fast deck's recording down: say the samples were taken more slowly (lower pitch,
@@ -289,11 +292,15 @@ async function saveTracks(id, body) {
         '-c:a', 'flac', '-sample_fmt', 's16', '-compression_level', '8', '-map_metadata', '-1',
         ...Object.entries(meta).filter(([, v]) => v !== '' && v != null).flatMap(([k, v]) => ['-metadata', `${k}=${v}`]),
         path.join(dir, name)]);
+      // The MP3 copy is made from the finished FLAC, so it has the same sound, tags and cover.
+      if (mp3Dir) await runFfmpeg(['-i', path.join(dir, name), '-map', '0', '-c:a', 'libmp3lame', '-q:a', '0', '-c:v', 'copy', '-id3v2_version', '3', '-map_metadata', '0',
+        path.join(mp3Dir, name.replace(/.flac$/, '.mp3'))]);
       files.push(name);
     }
-    const edit = { album: a, tracks, rpm: rpm || null, corrected: correct, savedAt: new Date().toISOString(), dir, files, cover: cover && path.basename(cover) };
+    const edit = { album: a, tracks, rpm: rpm || null, corrected: correct, savedAt: new Date().toISOString(), dir, mp3Dir, files, cover: cover && path.basename(cover) };
     fs.writeFileSync(path.join(rawDir(), id + '.edit.json'), JSON.stringify(edit, null, 2));
-    log(`Saved ${files.length} tracks from "${id}" in ${dir}.`);
+    if (typeof body.mp3 === 'boolean' && body.mp3 !== conf.mp3) { conf.mp3 = body.mp3; saveConf(); }
+    log(`Saved ${files.length} tracks from "${id}" in ${dir}${mp3Dir ? ', with MP3 copies' : ''}.`);
     tell('save', { id, done: tracks.length, of: tracks.length });
     return edit;
   } finally { saving = null; }
@@ -392,7 +399,7 @@ const server = http.createServer(async (req, res) => {
         return info ? sendJson(res, 200, info.levels || []) : sendJson(res, 404, { error: 'Not found' });
       }
       // What was chosen and saved for it last time (or {}), with the deck speed to offer.
-      if (req.method === 'GET' && what === 'edit') return sendJson(res, 200, { edit: editOf(id), rpm: await deckRpm() });
+      if (req.method === 'GET' && what === 'edit') return sendJson(res, 200, { edit: editOf(id), rpm: await deckRpm(), mp3: conf.mp3 });
       if (req.method === 'POST') {
         const body = JSON.parse((await readBody(req)).toString() || '{}');
         if (what === 'propose') return sendJson(res, 200, await proposeFor(id, body.id, String(body.side ?? '')));

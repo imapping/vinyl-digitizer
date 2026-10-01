@@ -6,7 +6,7 @@ const Editor = (() => {
   const root = () => $('editor');
   let rec, levels, per;                 // the recording, its level trace, and readings per second
   let album, tracks, marks;             // marks: the start, each cut, and the end (seconds): tracks.length + 1 of them
-  let rpm, correct, rpmGuess, note, sel, centre, records, saved, busy, error;
+  let rpm, correct, mp3 = true, rpmGuess, note, sel, centre, records, saved, busy, error;
   let audio, stopAt = null;
 
   const h = (tag, props = {}, ...kids) => {
@@ -155,20 +155,21 @@ const Editor = (() => {
       h('table', { className: 'tracks' }, h('thead', {}, h('tr', {}, ...['', 'Title', 'Starts', 'Length', ''].map(t => h('th', {}, t)))), h('tbody', {}, rows)),
       h('div', { className: 'row', style: 'margin-top:12px' },
         h('label', {}, 'Deck speed', h('input', { type: 'text', value: rpm, style: 'flex:0 0 70px; width:70px', onchange: e => { const v = Number(e.target.value); if (v >= 30 && v <= 37) { rpm = Math.round(v * 100) / 100; api('/api/settings', { rpm }).catch(() => {}); } render(); } }), 'RPM'),
-        h('label', {}, h('input', { type: 'checkbox', checked: correct, onchange: e => { correct = e.target.checked; render(); } }), 'Correct the speed when saving')),
+        h('label', {}, h('input', { type: 'checkbox', checked: correct, onchange: e => { correct = e.target.checked; render(); } }), 'Correct the speed when saving'),
+        h('label', {}, h('input', { type: 'checkbox', checked: mp3, onchange: e => { mp3 = e.target.checked; } }), 'Also save MP3 copies')),
       h('div', { className: 'dim', style: 'margin-top:4px' },
         allDur ? `The side plays for ${clock(played)}${correct ? ' once corrected' : ''}; Discogs' track lengths add up to ${clock(total)}. ` : '',
         rpmGuess ? `Going by those lengths the deck ran at about ${rpmGuess.toFixed(1)} RPM (a rough figure: it counts the gaps between tracks as music).` : ''),
       h('div', { className: 'row', style: 'margin-top:14px' },
         h('button', { disabled: !!busy, onclick: save }, busy || (saved ? 'Save the tracks again' : 'Save the tracks')),
         h('button', { className: 'plain', onclick: close }, 'Close')),
-      saved ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.cover ? '' : ' (No cover picture was available.)')) : null);
+      saved ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.mp3Dir ? ` MP3 copies are in ${saved.mp3Dir}.` : '') + (saved.cover ? '' : ' (No cover picture was available.)')) : null);
   }
 
   async function save() {
     error = ''; busy = 'Saving…'; render();
     try {
-      saved = await api('/api/recordings/' + encodeURIComponent(rec.id) + '/save', { album, rpm, correct,
+      saved = await api('/api/recordings/' + encodeURIComponent(rec.id) + '/save', { album, rpm, correct, mp3,
         tracks: tracks.map((t, i) => ({ pos: t.pos, number: t.number, title: t.title.trim() || 'Track ' + t.number, artist: t.artist, dur: t.dur, start: marks[i], end: marks[i + 1] })) });
       if (typeof list === 'function') list();
     } catch (e) { error = e.message; }
@@ -201,7 +202,7 @@ const Editor = (() => {
     audio.ontimeupdate = () => { if (stopAt != null && audio.currentTime >= stopAt) { audio.pause(); stopAt = null; } redraw(); };
     audio.onpause = redraw;
     try {
-      [levels, { edit: saved, rpm }] = await Promise.all([api('/api/recordings/' + encodeURIComponent(r.id) + '/levels'), api('/api/recordings/' + encodeURIComponent(r.id) + '/edit')]);
+      [levels, { edit: saved, rpm, mp3 }] = await Promise.all([api('/api/recordings/' + encodeURIComponent(r.id) + '/levels'), api('/api/recordings/' + encodeURIComponent(r.id) + '/edit')]);
       if (saved) {   // carry on from what was saved last time
         album = saved.album; tracks = saved.tracks.map(t => ({ ...t })); marks = [...saved.tracks.map(t => t.start), saved.tracks[saved.tracks.length - 1].end];
         rpm = saved.rpm || rpm; correct = saved.corrected; select(0);
