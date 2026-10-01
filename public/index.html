@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vinyl Digitizer</title>
+<style>
+  :root { --bg: #f6f4ef; --card: #fff; --ink: #22201c; --dim: #6d675c; --line: #dcd6c8; --accent: #b3402a; --good: #2f7d4f; --warn: #b07a12; --wave: #3b5b7a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171614; --card: #22201d; --ink: #ece8df; --dim: #a09a8d; --line: #3a362f; --accent: #e0674e; --good: #6cc08d; --warn: #e0b04e; --wave: #8fb3d6; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-top: 16px; }
+  .dim { color: var(--dim); font-size: .9rem; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input[type=text] { flex: 1 1 260px; min-width: 0; padding: 9px 10px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  button { padding: 9px 18px; font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.plain { background: none; color: var(--ink); border: 1px solid var(--line); font-weight: 400; }
+  canvas { display: block; width: 100%; height: 90px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; margin-top: 10px; }
+  .meter { height: 14px; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; margin-top: 12px; }
+  .meter div { height: 100%; width: 0; background: var(--good); transition: width .1s linear; }
+  .big { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+  .ok { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--accent); }
+  .rec { border-top: 1px solid var(--line); padding: 12px 0; }
+  .rec:first-of-type { border-top: 0; padding-top: 0; }
+  .rec audio { width: 100%; margin-top: 8px; }
+  .rec ul { margin: 6px 0 0; padding-left: 20px; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vinyl Digitizer</h1>
+  <div class="dim" id="checks">Checking…</div>
+
+  <div class="card">
+    <h2>Record a side</h2>
+    <div class="row">
+      <input type="text" id="name" placeholder="Record and side, e.g. Queen - Greatest Hits, side A" maxlength="100">
+      <button id="go">Record</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label><input type="checkbox" id="auto"> Stop by itself when the arm lifts</label>
+    </div>
+    <div class="row" style="margin-top:14px; justify-content: space-between">
+      <span class="big" id="clock">0:00</span>
+      <span id="status" class="dim">Not recording.</span>
+      <span class="dim" id="dbnow"></span>
+    </div>
+    <div class="meter"><div id="bar"></div></div>
+    <canvas id="live"></canvas>
+    <div class="dim" id="error" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Recordings</h2>
+    <div id="list" class="dim">None yet.</div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const api = async (path, body) => {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+const clock = s => { s = Math.floor(s); const m = Math.floor(s / 60); return (m >= 60 ? Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') : m) + ':' + String(s % 60).padStart(2, '0'); };
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+let st = null, levels = [];
+
+// The waveform: the loudest moment in each slice of the recording, on a decibel scale (-60 to 0).
+function draw(canvas, lv) {
+  const w = canvas.clientWidth, h = canvas.clientHeight, dpr = devicePixelRatio || 1;
+  if (canvas.width !== w * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (!lv.length) return;
+  g.fillStyle = css('--wave');
+  const per = Math.max(1, lv.length / w);
+  for (let x = 0; x < w && x * per < lv.length; x++) {
+    let p = 0;
+    for (let i = Math.floor(x * per); i < Math.min(lv.length, Math.ceil((x + 1) * per)); i++) if (lv[i][0] > p) p = lv[i][0];
+    const d = p > 0 ? 20 * Math.log10(p) : -99;
+    const bar = Math.max(1, (Math.max(-60, d) + 60) / 60 * (h - 4));
+    g.fillRect(x, (h - bar) / 2, 1, bar);
+  }
+}
+
+function show() {
+  const r = st.recording;
+  $('go').textContent = r ? (r.stopping ? 'Finishing…' : 'Stop') : 'Record';
+  $('go').disabled = !!(r && r.stopping) || (!r && (!st.ffmpeg || !st.outOk));
+  $('name').disabled = !!r;
+  $('auto').checked = st.conf.autoStop;
+  $('status').textContent = !r ? 'Not recording.' : r.stopping ? 'Saving the file…' : 'Recording' + (r.name ? ': ' + r.name : '') + '.';
+  if (!r) { $('bar').style.width = '0'; $('dbnow').textContent = ''; }
+}
+
+async function checks() {
+  const parts = [];
+  parts.push(st.outOk ? ['ok', 'Recordings go in ' + st.conf.outDir] : ['bad', 'The recordings folder ' + st.conf.outDir + ' isn\'t there. Is the drive plugged in?']);
+  if (!st.ffmpeg) parts.push(['bad', 'ffmpeg wasn\'t found on this computer']);
+  const s = await api('/api/source').catch(() => ({ ok: false }));
+  if (!s.ok) parts.push(['bad', 'Can\'t reach the TimesGate controller at ' + st.conf.source]);
+  else if (s.error) parts.push(['warn', 'The controller reports a problem with its input: ' + s.error]);
+  else if (!s.shared && !s.local) parts.push(['warn', 'The controller is reachable, but its input isn\'t marked as a direct connection and this computer isn\'t trusted, so it will refuse to stream']);
+  else parts.push(['ok', 'Controller reachable (' + s.device + ')']);
+  $('checks').replaceChildren(...parts.flatMap(([c, t], i) => { const e = document.createElement('span'); e.className = c; e.textContent = t; return i ? [' · ', e] : [e]; }));
+}
+
+function verdict(r) {
+  const out = [];
+  out.push([r.cutShort ? 'bad' : 'ok', r.cutShort ? 'Cut short: ' + r.stopped : 'Complete. ' + r.stopped]);
+  if (r.error) out.push(['bad', 'ffmpeg reported: ' + r.error]);
+  out.push([r.clipped ? 'bad' : 'ok', `Loudest point ${r.peakDb} dB, average ${r.averageDb} dB. ` + (r.clipped ? `${r.clipped} samples hit the limit (clipping).` : 'No clipping.')]);
+  if (r.hum) {
+    const h = r.hum, c = h.db > -55 ? 'warn' : 'ok';
+    const say = h.db > -55 ? 'it may be audible between tracks' : h.db > -65 ? 'probably too faint to hear' : 'too faint to hear';
+    out.push([c, `Hum around 50 Hz in the quiet parts: ${h.db} dB (${Math.round(h.share * 100)}% of the noise there, which sits at ${h.quietDb} dB), ${say}.`]);
+  } else out.push(['dim', 'No quiet part to measure hum in.']);
+  return out;
+}
+
+async function list() {
+  const recs = await api('/api/recordings');
+  if (!recs.length) { $('list').textContent = 'None yet.'; return; }
+  $('list').className = '';
+  $('list').replaceChildren(...recs.map(r => {
+    const d = document.createElement('div'); d.className = 'rec';
+    const t = document.createElement('div'); t.style.fontWeight = 600; t.textContent = r.name || '(no name)';
+    const m = document.createElement('div'); m.className = 'dim';
+    m.textContent = `${new Date(r.started).toLocaleString()} · ${clock(r.seconds)} · ${r.bytes ? (r.bytes / 1048576).toFixed(1) + ' MB' : 'no file'} · ${r.file}`;
+    const ul = document.createElement('ul');
+    for (const [c, text] of verdict(r)) { const li = document.createElement('li'); li.className = c; li.textContent = text; ul.append(li); }
+    const a = document.createElement('audio'); a.controls = true; a.preload = 'none'; a.src = '/audio/' + encodeURIComponent(r.id);
+    const cv = document.createElement('canvas'); cv.style.height = '60px';
+    d.append(t, m, ul, a, cv);
+    api('/api/recordings/' + encodeURIComponent(r.id) + '/levels').then(lv => draw(cv, lv)).catch(() => {});
+    return d;
+  }));
+}
+
+$('go').onclick = async () => {
+  $('error').textContent = '';
+  try {
+    if (st.recording) st = await api('/api/stop', {});
+    else { levels = []; draw($('live'), levels); $('clock').textContent = '0:00'; st = await api('/api/record', { name: $('name').value }); }
+    show();
+  } catch (e) { $('error').className = 'bad'; $('error').textContent = e.message; }
+};
+$('auto').onchange = async () => { st = await api('/api/settings', { autoStop: $('auto').checked }); show(); };
+
+const es = new EventSource('/api/events');
+es.addEventListener('level', e => {
+  const l = JSON.parse(e.data);
+  levels.push([l.peak, l.db]);
+  $('clock').textContent = clock(l.t);
+  $('dbnow').textContent = l.db.toFixed(0) + ' dB';
+  $('bar').style.width = Math.max(0, Math.min(100, (l.db + 70) / 70 * 100)) + '%';
+  draw($('live'), levels);
+});
+es.addEventListener('state', e => {
+  const was = st && st.recording;
+  st = { ...st, ...JSON.parse(e.data) };
+  show();
+  if (was && !st.recording) list();
+});
+
+(async () => {
+  const s = await api('/api/state');
+  levels = s.levels; st = s;
+  show(); draw($('live'), levels);
+  if (levels.length) $('clock').textContent = clock(levels.length / 10);
+  checks(); list();
+})();
+addEventListener('resize', () => draw($('live'), levels));
+</script>
+</body>
+</html>

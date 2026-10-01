@@ -1,0 +1,9 @@
+{
+  "name": "vinyl-digitizer",
+  "version": "0.1.0",
+  "description": "Records a record's side from the TimesGate controller's turntable stream and saves it as FLAC",
+  "private": true,
+  "main": "server.js",
+  "scripts": { "start": "node server.js", "fake-turntable": "node test/fake-turntable.js" },
+  "engines": { "node": ">=20" }
+}
