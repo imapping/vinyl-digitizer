@@ -8,6 +8,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { once } = require('events');
 const { makeMeter, RATE, BLOCK_S } = require('./meter');
+const { propose } = require('./split');
 
 const PORT = Number(process.env.PORT) || 8090;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -142,13 +143,160 @@ function stopRecording(why = 'Stopped by you.') {
   tell('state', state());
 }
 
+// Beside each recording: <id>.json (what was measured as it was recorded, never changed afterwards)
+// and, once it's been split, <id>.edit.json (the record, the cuts, and the files saved from it).
+const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+const infoOf = id => readJson(path.join(rawDir(), id + '.json'));
+const editOf = id => readJson(path.join(rawDir(), id + '.edit.json'));
+
 // The finished recordings, newest first (without their level traces).
 function recordings() {
   let files = [];
-  try { files = fs.readdirSync(rawDir()).filter(f => f.endsWith('.json')); } catch {}
+  try { files = fs.readdirSync(rawDir()).filter(f => f.endsWith('.json') && !f.endsWith('.edit.json')); } catch {}
   return files.map(f => {
-    try { const { levels, ...info } = JSON.parse(fs.readFileSync(path.join(rawDir(), f), 'utf8')); return info; } catch { return null; }
+    const all = readJson(path.join(rawDir(), f));
+    if (!all) return null;
+    const { levels, ...info } = all, e = editOf(info.id);
+    if (e) info.split = { album: e.album?.album, artist: e.album?.artist, side: e.album?.side, tracks: e.tracks?.length, savedAt: e.savedAt || null, dir: e.dir || null };
+    return info;
   }).filter(Boolean).sort((a, b) => b.started.localeCompare(a.started));
+}
+
+// ---------- the record collection (Discogs, through the controller's Vinyl plugin) ----------
+const COLLECTION_FILE = path.join(DATA_DIR, 'collection.json');
+async function fromController(pathAndQuery) {
+  let r;
+  try { r = await fetch(conf.source + pathAndQuery, { signal: AbortSignal.timeout(10000) }); }
+  catch (e) { throw fail(502, `Couldn't reach the TimesGate controller at ${conf.source} (${e.cause?.code || e.message}).`); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw fail(r.status === 404 ? 404 : 502, j.error || `The controller answered ${r.status}. It may need updating.`);
+  return j;
+}
+// [{ id, title, artist, year, sides: [{ side, tracks }] }]; the last list fetched is kept for when the controller is off.
+async function collection() {
+  try {
+    const { records } = await fromController('/api/vinyl/records');
+    if (records?.length) { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(COLLECTION_FILE, JSON.stringify(records)); }
+    return records || [];
+  } catch (e) {
+    const saved = readJson(COLLECTION_FILE);
+    if (saved) return saved;
+    throw e;
+  }
+}
+// The deck's measured speed: this app's own setting, or else the controller's Vinyl setting.
+async function deckRpm() {
+  if (conf.rpm) return conf.rpm;
+  try { const s = await fromController('/api/vinyl/state'); if (s.rpm >= 30 && s.rpm <= 37) return s.rpm; } catch {}
+  return NOMINAL_RPM;
+}
+// Where a side's tracks sit on the album: two sides to a disc (A and B are disc 1, C and D disc 2),
+// numbered from 1 on each disc. Sides that aren't single letters count as one disc.
+function numbering(record, side) {
+  const sides = record?.sides || [], k = sides.findIndex(s => s.side === side);
+  const lettered = sides.length > 0 && sides.every(s => /^[A-Z]$/.test(s.side));
+  if (k < 0) return { disc: 1, discs: 1, first: 1, total: null };
+  const count = (a, b) => sides.slice(a, b).reduce((n, s) => n + s.tracks, 0);
+  if (!lettered) return { disc: 1, discs: 1, first: count(0, k) + 1, total: count(0, sides.length) };
+  const d = Math.floor(k / 2);
+  return { disc: d + 1, discs: Math.ceil(sides.length / 2), first: count(d * 2, k) + 1, total: count(d * 2, d * 2 + 2) };
+}
+
+// A side chosen for a recording: its tracks, and where they probably start and end.
+async function proposeFor(id, recordId, side) {
+  const info = infoOf(id);
+  if (!info) throw fail(404, 'That recording isn\'t there.');
+  const album = await fromController(`/api/vinyl/side?id=${encodeURIComponent(recordId)}&side=${encodeURIComponent(side)}`);
+  const record = (await collection().catch(() => [])).find(r => String(r.id) === String(recordId));
+  const p = propose(info.levels, info.blockSeconds, album.tracks.map(t => t.dur || null));
+  if (!p) throw fail(400, 'No music was found in that recording.');
+  const marks = [p.start, ...p.cuts, p.end], num = numbering(record, side);
+  return {
+    album: { id: album.id, album: album.album, artist: album.artist, year: album.year, cover: album.cover, link: album.link, side: album.side, disc: num.disc, discs: num.discs, total: num.total },
+    tracks: album.tracks.map((t, i) => ({ pos: t.pos, number: num.first + i, title: t.title, artist: t.artist, dur: t.dur || null, start: marks[i], end: marks[i + 1], sure: i === 0 || p.sure[i - 1] })),
+    rpm: await deckRpm(), rpmFromLengths: p.rpm, note: p.note,
+  };
+}
+
+// ---------- saving the tracks ----------
+const NOMINAL_RPM = 100 / 3;
+const fileSafe = v => String(v || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '').slice(0, 120) || 'Unknown';
+const COVER = /^https:\/\/(i|img)\.discogs\.com\//;
+let saving = null;   // the id of the recording being saved
+
+// The record's cover, saved in the album's folder: its path, or null.
+async function fetchCover(url, dir) {
+  if (!COVER.test(url || '')) return null;
+  try {
+    const r = await fetch(url, { headers: { 'User-Agent': 'VinylDigitizer/0.1' }, signal: AbortSignal.timeout(20000) });
+    const type = r.headers.get('content-type') || '';
+    if (!r.ok || !/^image\/(jpeg|png)/.test(type)) return null;
+    const file = path.join(dir, type.includes('png') ? 'cover.png' : 'cover.jpg');
+    fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+    return file;
+  } catch { return null; }
+}
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', ...args], { windowsHide: true });
+    let err = '';
+    p.stderr.on('data', d => { err = (err + d).slice(-800); });
+    p.on('error', reject);
+    p.on('close', code => (code ? reject(new Error(err.trim() || `ffmpeg stopped with code ${code}`)) : resolve()));
+  });
+}
+
+// body: { album: { album, artist, year, … }, tracks: [{ title, artist, pos, number, start, end }], rpm, correct }
+// Cuts each track out of the raw recording (which is never changed), corrects the speed if asked,
+// and saves it tagged, in <outDir>/<artist>/<album (year)>/. Saving again replaces the earlier files.
+async function saveTracks(id, body) {
+  const info = infoOf(id);
+  if (!info) throw fail(404, 'That recording isn\'t there.');
+  if (saving) throw fail(409, 'Tracks are already being saved. Wait for that to finish.');
+  if (!FFMPEG) throw fail(500, 'ffmpeg wasn\'t found on this computer.');
+  const a = body.album || {}, tracks = Array.isArray(body.tracks) ? body.tracks : [];
+  const rpm = Number(body.rpm), correct = !!body.correct && Math.abs(rpm / NOMINAL_RPM - 1) > 0.0005;
+  if (!tracks.length) throw fail(400, 'There are no tracks to save.');
+  if (body.correct && !(rpm >= 30 && rpm <= 37)) throw fail(400, 'The deck speed should be between 30 and 37 RPM.');
+  let before = 0;
+  for (const t of tracks) {
+    if (!(Number.isFinite(t.start) && Number.isFinite(t.end) && t.start >= before && t.end > t.start && t.end <= info.seconds + 0.1)) throw fail(400, 'The cuts are out of order or outside the recording.');
+    before = t.end;
+  }
+  const raw = path.join(rawDir(), info.file);
+  if (!fs.existsSync(raw)) throw fail(404, 'The recording\'s FLAC file is missing.');
+
+  saving = id;
+  try {
+    const year = /^\d{4}$/.test(String(a.year || '')) ? String(a.year) : '';
+    const dir = path.join(conf.outDir, fileSafe(a.artist), fileSafe(a.album) + (year ? ` (${year})` : ''));
+    fs.mkdirSync(dir, { recursive: true });
+    const cover = await fetchCover(a.cover, dir);
+    const width = Math.max(2, ...tracks.map(t => String(t.number || 0).length));
+    // Slowing a fast deck's recording down: say the samples were taken more slowly (lower pitch,
+    // longer), then resample back to 44.1 kHz with the high-quality resampler.
+    const fix = correct ? `,asetrate=${Math.round(info.rate * NOMINAL_RPM / rpm)},aresample=${info.rate}:resampler=soxr:precision=28:dither_method=triangular` : '';
+    const files = [];
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i], n = t.number || i + 1;
+      const name = (a.discs > 1 ? `${a.disc}-` : '') + String(n).padStart(width, '0') + ' ' + fileSafe(t.title) + '.flac';
+      tell('save', { id, done: i, of: tracks.length, title: t.title });
+      const meta = { title: t.title, artist: t.artist || a.artist, album: a.album, album_artist: a.artist, track: a.total ? `${n}/${a.total}` : String(n),
+        disc: a.discs > 1 ? `${a.disc}/${a.discs}` : '', date: year, DISCOGS_RELEASE_ID: a.id || '', VINYL_POSITION: t.pos || '',
+        comment: `Digitised from vinyl${a.side ? ', side ' + a.side : ''}. ` + (correct ? `Deck speed ${rpm} RPM, corrected to 33⅓.` : `Not speed-corrected${rpm ? ` (deck speed ${rpm} RPM)` : ''}.`) };
+      await runFfmpeg(['-i', raw, ...(cover ? ['-i', cover] : []), '-map', '0:a', ...(cover ? ['-map', '1:v', '-c:v', 'copy', '-disposition:v', 'attached_pic'] : []),
+        '-af', `atrim=start_sample=${Math.round(t.start * info.rate)}:end_sample=${Math.round(t.end * info.rate)},asetpts=PTS-STARTPTS${fix}`,
+        '-c:a', 'flac', '-sample_fmt', 's16', '-compression_level', '8', '-map_metadata', '-1',
+        ...Object.entries(meta).filter(([, v]) => v !== '' && v != null).flatMap(([k, v]) => ['-metadata', `${k}=${v}`]),
+        path.join(dir, name)]);
+      files.push(name);
+    }
+    const edit = { album: a, tracks, rpm: rpm || null, corrected: correct, savedAt: new Date().toISOString(), dir, files, cover: cover && path.basename(cover) };
+    fs.writeFileSync(path.join(rawDir(), id + '.edit.json'), JSON.stringify(edit, null, 2));
+    log(`Saved ${files.length} tracks from "${id}" in ${dir}.`);
+    tell('save', { id, done: tracks.length, of: tracks.length });
+    return edit;
+  } finally { saving = null; }
 }
 
 function state() {
@@ -225,6 +373,7 @@ const server = http.createServer(async (req, res) => {
       if (typeof b.autoStop === 'boolean') conf.autoStop = b.autoStop;
       if (Number.isFinite(b.quietDb)) conf.quietDb = Math.max(-90, Math.min(-40, b.quietDb));
       if (Number.isFinite(b.quietS)) conf.quietS = Math.max(3, Math.min(60, b.quietS));
+      if (Number.isFinite(b.rpm) && b.rpm >= 30 && b.rpm <= 37) conf.rpm = Math.round(b.rpm * 100) / 100;   // the deck's measured speed at 33⅓
       saveConf();
       return sendJson(res, 200, state());
     }
@@ -234,12 +383,23 @@ const server = http.createServer(async (req, res) => {
       const id = safeId(decodeURIComponent(m[1]));
       return id ? sendFile(req, res, path.join(rawDir(), id + '.flac'), 'audio/flac') : sendJson(res, 400, { error: 'Bad name' });
     }
-    m = /^\/api\/recordings\/(.+)\/levels$/.exec(url.pathname);
-    if (req.method === 'GET' && m) {
-      const id = safeId(decodeURIComponent(m[1]));
-      try { return sendJson(res, 200, JSON.parse(fs.readFileSync(path.join(rawDir(), id + '.json'), 'utf8')).levels || []); }
-      catch { return sendJson(res, 404, { error: 'Not found' }); }
+    m = /^\/api\/recordings\/(.+)\/(levels|edit|propose|save)$/.exec(url.pathname);
+    if (m) {
+      const id = safeId(decodeURIComponent(m[1])), what = m[2];
+      if (!id) return sendJson(res, 400, { error: 'Bad name' });
+      if (req.method === 'GET' && what === 'levels') {
+        const info = infoOf(id);
+        return info ? sendJson(res, 200, info.levels || []) : sendJson(res, 404, { error: 'Not found' });
+      }
+      // What was chosen and saved for it last time (or {}), with the deck speed to offer.
+      if (req.method === 'GET' && what === 'edit') return sendJson(res, 200, { edit: editOf(id), rpm: await deckRpm() });
+      if (req.method === 'POST') {
+        const body = JSON.parse((await readBody(req)).toString() || '{}');
+        if (what === 'propose') return sendJson(res, 200, await proposeFor(id, body.id, String(body.side ?? '')));
+        if (what === 'save') return sendJson(res, 200, await saveTracks(id, body));
+      }
     }
+    if (req.method === 'GET' && url.pathname === '/api/collection') return sendJson(res, 200, await collection());
 
     if (req.method === 'GET') {
       const rel = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);

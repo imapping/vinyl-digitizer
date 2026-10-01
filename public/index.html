@@ -31,6 +31,13 @@
   .rec audio { width: 100%; margin-top: 8px; }
   .rec ul { margin: 6px 0 0; padding-left: 20px; }
   label { display: inline-flex; gap: 6px; align-items: center; }
+  a { color: var(--accent); }
+  table.tracks { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  table.tracks th { text-align: left; font-weight: 600; font-size: .85rem; color: var(--dim); padding: 4px 6px; }
+  table.tracks td { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: top; font-variant-numeric: tabular-nums; }
+  table.tracks tr.on td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  table.tracks button, #editor .row button.plain { padding: 5px 10px; }
+  #editor input[type=text] { flex: 1 1 auto; padding: 6px 8px; }
 </style>
 </head>
 <body>
@@ -56,6 +63,8 @@
     <canvas id="live"></canvas>
     <div class="dim" id="error" style="margin-top:8px"></div>
   </div>
+
+  <div class="card" id="editor" hidden></div>
 
   <div class="card">
     <h2>Recordings</h2>
@@ -142,7 +151,12 @@ async function list() {
     for (const [c, text] of verdict(r)) { const li = document.createElement('li'); li.className = c; li.textContent = text; ul.append(li); }
     const a = document.createElement('audio'); a.controls = true; a.preload = 'none'; a.src = '/audio/' + encodeURIComponent(r.id);
     const cv = document.createElement('canvas'); cv.style.height = '60px';
-    d.append(t, m, ul, a, cv);
+    const sp = r.split, b = document.createElement('div'); b.className = 'row'; b.style.marginTop = '8px';
+    const go = document.createElement('button'); go.textContent = sp ? 'Edit the tracks' : 'Split into tracks'; go.onclick = () => Editor.open(r);
+    const done = document.createElement('span'); done.className = sp ? 'ok' : 'dim';
+    done.textContent = sp ? `${sp.tracks} tracks saved as ${sp.artist} – ${sp.album}${sp.side ? ', side ' + sp.side : ''}, in ${sp.dir}` : 'Not split into tracks yet.';
+    b.append(go, done);
+    d.append(t, m, ul, a, cv, b);
     api('/api/recordings/' + encodeURIComponent(r.id) + '/levels').then(lv => draw(cv, lv)).catch(() => {});
     return d;
   }));
@@ -174,6 +188,8 @@ es.addEventListener('state', e => {
   if (was && !st.recording) list();
 });
 
+es.addEventListener('save', e => Editor.progress(JSON.parse(e.data)));
+
 (async () => {
   const s = await api('/api/state');
   levels = s.levels; st = s;
@@ -183,5 +199,6 @@ es.addEventListener('state', e => {
 })();
 addEventListener('resize', () => draw($('live'), levels));
 </script>
+<script src="/editor.js"></script>
 </body>
 </html>

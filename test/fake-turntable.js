@@ -30,6 +30,20 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ running: true, error: null, device: 'pretend turntable', users: [], shared: true, local: false }));
   }
+  // The Vinyl plugin's collection: one record, whose side A matches the real Queen test recording.
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  if (req.url === '/api/vinyl/state') return json(200, { rpm: 34.1 });
+  if (req.url === '/api/vinyl/records') return json(200, { records: [
+    { id: 9371072, title: 'Greatest Hits', artist: 'Queen', year: 2016, sides: [{ side: 'A', tracks: 4 }, { side: 'B', tracks: 4 }, { side: 'C', tracks: 4 }, { side: 'D', tracks: 5 }] },
+    { id: 2, title: 'Test Tones', artist: 'The Oscillators', year: 2026, sides: [{ side: 'A', tracks: 2 }] }] });
+  if (req.url.startsWith('/api/vinyl/side')) {
+    const q = new URL(req.url, 'http://x').searchParams;
+    if (q.get('id') === '9371072' && q.get('side') === 'A') return json(200, { id: 9371072, album: 'Greatest Hits', artist: 'Queen', year: 2016, cover: null, link: 'https://www.discogs.com/release/9371072', side: 'A',
+      tracks: [['A1', 'Bohemian Rhapsody', 355], ['A2', 'Another One Bites The Dust', 216], ['A3', 'Killer Queen', 177], ['A4', 'Fat Bottomed Girls', 202]].map(([pos, title, dur]) => ({ pos, where: '', title, artist: 'Queen', dur })) });
+    if (q.get('id') === '2') return json(200, { id: 2, album: 'Test Tones', artist: 'The Oscillators', year: 2026, cover: null, link: null, side: 'A',
+      tracks: [{ pos: 'A1', title: 'Low Tone', artist: 'The Oscillators', dur: null }, { pos: 'A2', title: 'Same Again', artist: 'The Oscillators', dur: null }] });
+    return json(404, { error: 'That record or side isn\'t in the saved collection.' });
+  }
   if (req.url.startsWith('/api/mic/stream')) {
     res.writeHead(200, { 'Content-Type': 'audio/wav' });
     res.write(header());
