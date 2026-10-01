@@ -48,7 +48,7 @@ const Editor = (() => {
       g.fillRect(Math.round(px) - (i === sel ? 1 : 0), 0, i === sel ? 3 : 1, ht);
       if (i < tracks.length) g.fillText(String(tracks[i].number), px + 4, 1);
     });
-    if (audio && !audio.paused) { g.fillStyle = css('--good'); g.fillRect(x(audio.currentTime), 0, 1, ht); }
+    if (audio && !audio.paused) { g.fillStyle = css('--good'); g.fillRect(Math.round(x(audio.currentTime)) - 1, 0, 2, ht); }
   }
   function redraw() {
     const o = $('edOver'), d = $('edNear');
@@ -199,7 +199,15 @@ const Editor = (() => {
     if (audio) audio.pause();
     audio = new Audio('/audio/' + encodeURIComponent(r.id));
     audio.preload = 'metadata';
-    audio.ontimeupdate = () => { if (stopAt != null && audio.currentTime >= stopAt) { audio.pause(); stopAt = null; } redraw(); };
+    // While it plays, follow it every frame (the browser's own "timeupdate" only comes about 4 times a
+    // second, which left the playing line a quarter of a second behind the sound and stopped late).
+    const a = audio, follow = () => {
+      if (a !== audio || a.paused) return;
+      if (stopAt != null && a.currentTime >= stopAt) { a.pause(); stopAt = null; }
+      redraw();
+      requestAnimationFrame(follow);
+    };
+    audio.onplaying = follow;
     audio.onpause = redraw;
     try {
       [levels, { edit: saved, rpm, mp3 }] = await Promise.all([api('/api/recordings/' + encodeURIComponent(r.id) + '/levels'), api('/api/recordings/' + encodeURIComponent(r.id) + '/edit')]);
