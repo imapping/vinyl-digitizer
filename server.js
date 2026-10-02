@@ -75,7 +75,8 @@ function fileBase(name) {
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 
-async function startRecording(name) {
+// record: the record and side being played, when chosen from the collection: { id, side, artist, title }.
+async function startRecording(name, record) {
   if (rec) throw fail(409, 'A recording is already running.');
   if (!FFMPEG) throw fail(500, 'ffmpeg wasn\'t found on this computer.');
   if (!fs.existsSync(conf.outDir)) throw fail(400, `The recordings folder ${conf.outDir} isn't there. Is the drive plugged in?`);
@@ -98,7 +99,8 @@ async function startRecording(name) {
   ff.stderr.on('data', d => { ffErr = (ffErr + d).slice(-500); });
   ff.stdin.on('error', () => {});   // reported through the close code instead
 
-  const r = rec = { id: base, name: String(name || '').trim(), file, started: Date.now(), abort, ff, levels: [],
+  const of = record && record.id != null ? { id: record.id, side: String(record.side ?? ''), artist: String(record.artist || '').slice(0, 200), title: String(record.title || '').slice(0, 200) } : null;
+  const r = rec = { id: base, name: String(name || '').trim(), record: of, file, started: Date.now(), abort, ff, levels: [],
     heardMusic: false, loud: 0, quiet: 0, stopping: null };
   const meter = makeMeter(b => {
     r.levels.push([Math.round(b.peak * 1000) / 1000, b.db]);
@@ -134,7 +136,7 @@ async function startRecording(name) {
     // Finish the file, then write its notes beside it.
     ff.stdin.end();
     const [code] = ff.exitCode != null ? [ff.exitCode] : await once(ff, 'close');
-    const info = { id: r.id, name: r.name, file: path.basename(r.file), started: new Date(r.started).toISOString(),
+    const info = { id: r.id, name: r.name, record: r.record, file: path.basename(r.file), started: new Date(r.started).toISOString(),
       rate: RATE, channels: 2, bits: 16, ...meter.summary(), stopped: r.stopping || why, cutShort: !!why,
       error: code ? (ffErr.trim() || `ffmpeg stopped with code ${code}`) : null, blockSeconds: BLOCK_S, levels: r.levels };
     try { info.bytes = fs.statSync(r.file).size; } catch {}
@@ -163,12 +165,52 @@ function recordings() {
   let files = [];
   try { files = fs.readdirSync(rawDir()).filter(f => f.endsWith('.json') && !f.endsWith('.edit.json')); } catch {}
   return files.map(f => {
-    const all = readJson(path.join(rawDir(), f));
-    if (!all) return null;
-    const { levels, ...info } = all, e = editOf(info.id);
-    if (e) info.split = { album: e.album?.album, artist: e.album?.artist, side: e.album?.side, tracks: e.tracks?.length, savedAt: e.savedAt || null, dir: e.dir || null };
-    return info;
+    const file = path.join(rawDir(), f);
+    // (Each holds a long level trace, and they never change: read each one once.)
+    let info = infoCache.get(file);
+    if (!info) {
+      const all = readJson(file);
+      if (!all) return null;
+      const { levels, ...rest } = all;
+      infoCache.set(file, info = rest);
+    }
+    const e = editOf(info.id);
+    return e ? { ...info, split: { id: e.album?.id, album: e.album?.album, artist: e.album?.artist, side: e.album?.side, tracks: e.tracks?.length, draft: !!e.draft, savedAt: e.savedAt || null, dir: e.dir || null } } : info;
   }).filter(Boolean).sort((a, b) => b.started.localeCompare(a.started));
+}
+const infoCache = new Map();
+
+// ---------- the catalogue: every record in the collection, and how far each side has got ----------
+// A side is 'saved' (its tracks are saved), 'draft' (cuts chosen, tracks not saved since),
+// 'recorded' (recorded, not yet split) or 'none'. Nothing is stored for this: it's worked out from
+// the recordings and their .edit.json files, so it can't disagree with what's on the disk.
+const RANK = { none: 0, recorded: 1, draft: 2, saved: 3 };
+async function catalogue() {
+  const records = await collection(), sides = new Map();   // "id/side" -> { state, recording }
+  for (const r of [...recordings()].reverse()) {           // oldest first, so a newer recording wins a tie
+    const id = r.split?.id ?? r.record?.id, side = r.split ? r.split.side : r.record?.side;
+    if (id == null) continue;
+    const state = !r.split ? 'recorded' : r.split.draft || !r.split.savedAt ? 'draft' : 'saved', key = id + '/' + (side ?? '');
+    if (!sides.has(key) || RANK[state] >= RANK[sides.get(key).state]) sides.set(key, { state, recording: r.id });
+  }
+  const out = records.map(r => {
+    const ss = r.sides.map(s => ({ ...s, ...(sides.get(r.id + '/' + s.side) || { state: 'none' }) }));
+    const done = ss.filter(s => s.state === 'saved').length;
+    return { ...r, sides: ss, state: done === ss.length ? 'done' : ss.some(s => s.state !== 'none') ? 'started' : 'todo' };
+  });
+  const all = out.flatMap(r => r.sides);
+  return { records: out, totals: { records: out.length, done: out.filter(r => r.state === 'done').length, started: out.filter(r => r.state === 'started').length,
+    sides: all.length, sidesSaved: all.filter(s => s.state === 'saved').length, sidesWaiting: all.filter(s => s.state === 'recorded' || s.state === 'draft').length } };
+}
+
+// Keeps the record and cuts chosen for a recording without saving the tracks, to carry on later.
+function saveDraft(id, body) {
+  if (!infoOf(id)) throw fail(404, 'That recording isn\'t there.');
+  if (!body.album || !Array.isArray(body.tracks) || !body.tracks.length) throw fail(400, 'There\'s nothing to keep yet.');
+  const old = editOf(id) || {};
+  const edit = { ...old, album: body.album, tracks: body.tracks, rpm: Number(body.rpm) || null, corrected: !!body.correct, draft: true };
+  fs.writeFileSync(path.join(rawDir(), id + '.edit.json'), JSON.stringify(edit, null, 2));
+  return edit;
 }
 
 // ---------- the record collection (Discogs, through the controller's Vinyl plugin) ----------
@@ -325,7 +367,7 @@ async function saveTracks(id, body) {
 
 function state() {
   return { conf, ffmpeg: !!FFMPEG, outOk: fs.existsSync(conf.outDir),
-    recording: rec && { id: rec.id, name: rec.name, started: rec.started, heardMusic: rec.heardMusic, stopping: rec.stopping } };
+    recording: rec && { id: rec.id, name: rec.name, record: rec.record, started: rec.started, heardMusic: rec.heardMusic, stopping: rec.stopping } };
 }
 
 // What the controller says about its input (so the page can show whether it's reachable).
@@ -385,7 +427,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/record') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
-      await startRecording(body.name);
+      await startRecording(body.name, body.record);
       return sendJson(res, 200, state());
     }
     if (req.method === 'POST' && url.pathname === '/api/stop') { stopRecording(); return sendJson(res, 200, state()); }
@@ -407,7 +449,7 @@ const server = http.createServer(async (req, res) => {
       const id = safeId(decodeURIComponent(m[1]));
       return id ? sendFile(req, res, path.join(rawDir(), id + '.flac'), 'audio/flac') : sendJson(res, 400, { error: 'Bad name' });
     }
-    m = /^\/api\/recordings\/(.+)\/(levels|edit|propose|save)$/.exec(url.pathname);
+    m = /^\/api\/recordings\/(.+)\/(levels|edit|propose|save|draft)$/.exec(url.pathname);
     if (m) {
       const id = safeId(decodeURIComponent(m[1])), what = m[2];
       if (!id) return sendJson(res, 400, { error: 'Bad name' });
@@ -421,8 +463,10 @@ const server = http.createServer(async (req, res) => {
         const body = JSON.parse((await readBody(req)).toString() || '{}');
         if (what === 'propose') return sendJson(res, 200, await proposeFor(id, body.id, String(body.side ?? '')));
         if (what === 'save') return sendJson(res, 200, await saveTracks(id, body));
+        if (what === 'draft') return sendJson(res, 200, saveDraft(id, body));
       }
     }
+    if (req.method === 'GET' && url.pathname === '/api/catalogue') return sendJson(res, 200, await catalogue());
     if (req.method === 'GET' && url.pathname === '/api/collection') return sendJson(res, 200, await collection());
 
     if (req.method === 'GET') {

@@ -38,6 +38,14 @@
   table.tracks tr.on td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   table.tracks button, #editor .row button.plain { padding: 5px 10px; }
   #editor input[type=text] { flex: 1 1 auto; padding: 6px 8px; }
+  select { padding: 8px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  .catrow { padding: 5px 0; border-top: 1px solid var(--line); flex-wrap: nowrap; }
+  .catrow .name { flex: 1 1 auto; min-width: 0; }
+  .chips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; flex: 0 0 auto; max-width: 50%; }
+  button.chip { padding: 3px 9px; font-weight: 400; font-size: .9rem; background: none; color: var(--ink); border: 1px solid var(--line); border-radius: 12px; }
+  button.chip.recorded, button.chip.draft { border-color: var(--warn); color: var(--warn); }
+  button.chip.saved { border-color: var(--good); background: var(--good); color: #fff; }
+  #chosen { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -51,6 +59,7 @@
       <input type="text" id="name" placeholder="Record and side, e.g. Queen - Greatest Hits, side A" maxlength="100">
       <button id="go">Record</button>
     </div>
+    <div id="chosen" class="dim"></div>
     <div class="row" style="margin-top:10px">
       <label><input type="checkbox" id="auto"> Stop by itself when the arm lifts</label>
     </div>
@@ -65,6 +74,11 @@
   </div>
 
   <div class="card" id="editor" hidden></div>
+
+  <div class="card">
+    <h2>Your collection</h2>
+    <div id="cat" class="dim">Loading your collection…</div>
+  </div>
 
   <div class="card">
     <h2>Recordings</h2>
@@ -83,6 +97,23 @@ const clock = s => { s = Math.floor(s); const m = Math.floor(s / 60); return (m 
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 let st = null, levels = [];
+let chosen = null;        // the record and side about to be recorded: { id, side, artist, title }
+let recs = [];            // the finished recordings
+const recById = id => recs.find(r => r.id === id);
+
+// Sets up the Record card for one side of a record from the collection (or clears it).
+function chooseSide(record, side) {
+  chosen = record ? { id: record.id, side, artist: record.artist, title: record.title } : null;
+  if (chosen && !(st && st.recording)) $('name').value = `${record.artist} - ${record.title}` + (side ? ', side ' + side : '');
+  showChosen();
+  if (chosen) $('name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function showChosen() {
+  const el = $('chosen'), c = st && st.recording ? st.recording.record : chosen;
+  if (!c) { el.textContent = 'Tip: click a side under "Your collection" first, and the recording is filed under that record.'; return; }
+  const x = document.createElement('a'); x.href = '#'; x.textContent = 'clear'; x.onclick = e => { e.preventDefault(); chooseSide(null); };
+  el.replaceChildren(`From your collection: ${c.artist} – ${c.title}${c.side ? ', side ' + c.side : ''}`, ...(st && st.recording ? [] : [' · ', x]));
+}
 
 // The waveform: the loudest moment in each slice of the recording, on a decibel scale (-60 to 0).
 function draw(canvas, lv) {
@@ -111,6 +142,7 @@ function show() {
   $('auto').checked = st.conf.autoStop;
   $('status').textContent = !r ? 'Not recording.' : r.stopping ? 'Saving the file…' : 'Recording' + (r.name ? ': ' + r.name : '') + '.';
   if (!r) { $('bar').style.width = '0'; $('dbnow').textContent = ''; }
+  showChosen();
 }
 
 async function checks() {
@@ -139,7 +171,7 @@ function verdict(r) {
 }
 
 async function list() {
-  const recs = await api('/api/recordings');
+  recs = await api('/api/recordings');
   if (!recs.length) { $('list').textContent = 'None yet.'; return; }
   $('list').className = '';
   $('list').replaceChildren(...recs.map(r => {
@@ -152,9 +184,11 @@ async function list() {
     const a = document.createElement('audio'); a.controls = true; a.preload = 'none'; a.src = '/audio/' + encodeURIComponent(r.id);
     const cv = document.createElement('canvas'); cv.style.height = '60px';
     const sp = r.split, b = document.createElement('div'); b.className = 'row'; b.style.marginTop = '8px';
-    const go = document.createElement('button'); go.textContent = sp ? 'Edit the tracks' : 'Split into tracks'; go.onclick = () => Editor.open(r);
-    const done = document.createElement('span'); done.className = sp ? 'ok' : 'dim';
-    done.textContent = sp ? `${sp.tracks} tracks saved as ${sp.artist} – ${sp.album}${sp.side ? ', side ' + sp.side : ''}, in ${sp.dir}` : 'Not split into tracks yet.';
+    const saved = sp && sp.savedAt && !sp.draft;
+    const go = document.createElement('button'); go.textContent = saved ? 'Edit the tracks' : sp ? 'Carry on splitting' : 'Split into tracks'; go.onclick = () => Editor.open(r);
+    const done = document.createElement('span'); done.className = saved ? 'ok' : sp ? 'warn' : 'dim';
+    const as = sp && `${sp.artist} – ${sp.album}${sp.side ? ', side ' + sp.side : ''}`;
+    done.textContent = saved ? `${sp.tracks} tracks saved as ${as}, in ${sp.dir}` : sp ? `Cuts chosen for ${as}; the tracks aren't saved with them yet.` : 'Not split into tracks yet.';
     b.append(go, done);
     d.append(t, m, ul, a, cv, b);
     api('/api/recordings/' + encodeURIComponent(r.id) + '/levels').then(lv => draw(cv, lv)).catch(() => {});
@@ -166,7 +200,7 @@ $('go').onclick = async () => {
   $('error').textContent = '';
   try {
     if (st.recording) st = await api('/api/stop', {});
-    else { levels = []; draw($('live'), levels); $('clock').textContent = '0:00'; st = await api('/api/record', { name: $('name').value }); }
+    else { levels = []; draw($('live'), levels); $('clock').textContent = '0:00'; st = await api('/api/record', { name: $('name').value, record: chosen }); }
     show();
   } catch (e) { $('error').className = 'bad'; $('error').textContent = e.message; }
 };
@@ -185,7 +219,10 @@ es.addEventListener('state', e => {
   const was = st && st.recording;
   st = { ...st, ...JSON.parse(e.data) };
   show();
-  if (was && !st.recording) list();
+  if (was && !st.recording) {
+    // The side's done: refresh, and line up the record's next unrecorded side.
+    list().then(() => Catalogue.load()).then(() => { const n = was.record && Catalogue.nextSide(was.record.id, was.record.side); chooseSide(n ? n.record : null, n && n.side); if (!n) $('name').value = ''; });
+  }
 });
 
 es.addEventListener('save', e => Editor.progress(JSON.parse(e.data)));
@@ -195,10 +232,11 @@ es.addEventListener('save', e => Editor.progress(JSON.parse(e.data)));
   levels = s.levels; st = s;
   show(); draw($('live'), levels);
   if (levels.length) $('clock').textContent = clock(levels.length / 10);
-  checks(); list();
+  checks(); await list(); Catalogue.load();
 })();
 addEventListener('resize', () => draw($('live'), levels));
 </script>
 <script src="/editor.js"></script>
+<script src="/catalogue.js"></script>
 </body>
 </html>

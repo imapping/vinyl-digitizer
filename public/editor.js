@@ -161,18 +161,27 @@ const Editor = (() => {
         allDur ? `The side plays for ${clock(played)}${correct ? ' once corrected' : ''}; Discogs' track lengths add up to ${clock(total)}. ` : '',
         rpmGuess ? `Going by those lengths the deck ran at about ${rpmGuess.toFixed(1)} RPM (a rough figure: it counts the gaps between tracks as music).` : ''),
       h('div', { className: 'row', style: 'margin-top:14px' },
-        h('button', { disabled: !!busy, onclick: save }, busy || (saved ? 'Save the tracks again' : 'Save the tracks')),
+        h('button', { disabled: !!busy, onclick: save }, busy || (saved && saved.savedAt ? 'Save the tracks again' : 'Save the tracks')),
+        h('button', { className: 'plain', disabled: !!busy, onclick: keep, title: 'Remember the record and cuts without saving the tracks' }, 'Keep the cuts for later'),
         h('button', { className: 'plain', onclick: close }, 'Close')),
-      saved ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.mp3Dir ? ` MP3 copies are in ${saved.mp3Dir}.` : '') + (saved.cover ? ' The cover picture is in each file.' : '')) : null,
-      saved && !saved.cover ? h('div', { className: 'warn', style: 'margin-top:4px' }, 'No cover picture was added. ' + (saved.coverError || '') + ' Save the tracks again to retry.') : null);
+      saved && saved.draft ? h('div', { className: 'warn', style: 'margin-top:8px' }, 'The cuts are kept. The tracks ' + (saved.savedAt ? 'on the disk are from before these changes: save them again to update them.' : 'have not been saved yet.')) : null,
+      saved && saved.savedAt && !saved.draft ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.mp3Dir ? ` MP3 copies are in ${saved.mp3Dir}.` : '') + (saved.cover ? ' The cover picture is in each file.' : '')) : null,
+      saved && saved.savedAt && !saved.draft && !saved.cover ? h('div', { className: 'warn', style: 'margin-top:4px' }, 'No cover picture was added. ' + (saved.coverError || '') + ' Save the tracks again to retry.') : null);
   }
 
+  const body = () => ({ album, rpm, correct, mp3,
+    tracks: tracks.map((t, i) => ({ pos: t.pos, number: t.number, title: t.title.trim() || 'Track ' + t.number, artist: t.artist, dur: t.dur, start: marks[i], end: marks[i + 1] })) });
+  const refresh = () => { if (typeof list === 'function') list().then(() => Catalogue.load()); };
+  async function keep() {
+    error = '';
+    try { saved = await api('/api/recordings/' + encodeURIComponent(rec.id) + '/draft', body()); refresh(); } catch (e) { error = e.message; }
+    render();
+  }
   async function save() {
     error = ''; busy = 'Saving…'; render();
     try {
-      saved = await api('/api/recordings/' + encodeURIComponent(rec.id) + '/save', { album, rpm, correct, mp3,
-        tracks: tracks.map((t, i) => ({ pos: t.pos, number: t.number, title: t.title.trim() || 'Track ' + t.number, artist: t.artist, dur: t.dur, start: marks[i], end: marks[i + 1] })) });
-      if (typeof list === 'function') list();
+      saved = await api('/api/recordings/' + encodeURIComponent(rec.id) + '/save', body());
+      refresh();
     } catch (e) { error = e.message; }
     busy = null; render();
   }
@@ -181,11 +190,11 @@ const Editor = (() => {
     const el = root();
     el.hidden = !rec;
     if (!rec) return;
-    el.replaceChildren(
+    el.replaceChildren(...[
       h('h2', {}, 'Split into tracks: ' + (rec.name || rec.id)),
       album ? review() : picker(),
       error ? h('div', { className: 'bad', style: 'margin-top:8px' }, error) : null,
-      album ? null : h('div', { className: 'row', style: 'margin-top:12px' }, h('button', { className: 'plain', onclick: close }, 'Close')));
+      album ? null : h('div', { className: 'row', style: 'margin-top:12px' }, h('button', { className: 'plain', onclick: close }, 'Close'))].filter(Boolean));
     if (album) {
       drag($('edOver'), () => [0, rec.seconds]);
       drag($('edNear'), () => [centre - SPAN, centre + SPAN]);
@@ -215,7 +224,7 @@ const Editor = (() => {
       if (saved) {   // carry on from what was saved last time
         album = saved.album; tracks = saved.tracks.map(t => ({ ...t })); marks = [...saved.tracks.map(t => t.start), saved.tracks[saved.tracks.length - 1].end];
         rpm = saved.rpm || rpm; correct = saved.corrected; select(0);
-      }
+      } else if (r.record) return await choose(r.record.id, r.record.side).then(() => root().scrollIntoView({ behavior: 'smooth', block: 'start' }));   // chosen when it was recorded
     } catch (e) { error = e.message; }
     render();
     root().scrollIntoView({ behavior: 'smooth', block: 'start' });
