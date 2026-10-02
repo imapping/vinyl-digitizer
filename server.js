@@ -203,6 +203,22 @@ async function catalogue() {
     sides: all.length, sidesSaved: all.filter(s => s.state === 'saved').length, sidesWaiting: all.filter(s => s.state === 'recorded' || s.state === 'draft').length } };
 }
 
+// Takes a recording out of the list (a bad one, to be recorded again). Its files aren't destroyed:
+// they move to <outDir>/deleted, to be emptied by hand. Tracks already saved from it stay where they
+// are until the new recording's tracks replace them.
+function removeRecording(id) {
+  if (!infoOf(id)) throw fail(404, 'That recording isn\'t there.');
+  if (saving === id) throw fail(409, 'Its tracks are being saved. Wait for that to finish.');
+  const bin = path.join(conf.outDir, 'deleted');
+  fs.mkdirSync(bin, { recursive: true });
+  for (const ext of ['.flac', '.json', '.edit.json']) {
+    const from = path.join(rawDir(), id + ext);
+    if (fs.existsSync(from)) fs.renameSync(from, path.join(bin, id + ext));
+  }
+  infoCache.delete(path.join(rawDir(), id + '.json'));
+  log(`Moved "${id}" to ${bin}.`);
+}
+
 // Keeps the record and cuts chosen for a recording without saving the tracks, to carry on later.
 function saveDraft(id, body) {
   if (!infoOf(id)) throw fail(404, 'That recording isn\'t there.');
@@ -449,7 +465,7 @@ const server = http.createServer(async (req, res) => {
       const id = safeId(decodeURIComponent(m[1]));
       return id ? sendFile(req, res, path.join(rawDir(), id + '.flac'), 'audio/flac') : sendJson(res, 400, { error: 'Bad name' });
     }
-    m = /^\/api\/recordings\/(.+)\/(levels|edit|propose|save|draft)$/.exec(url.pathname);
+    m = /^\/api\/recordings\/(.+)\/(levels|edit|propose|save|draft|delete)$/.exec(url.pathname);
     if (m) {
       const id = safeId(decodeURIComponent(m[1])), what = m[2];
       if (!id) return sendJson(res, 400, { error: 'Bad name' });
@@ -464,6 +480,7 @@ const server = http.createServer(async (req, res) => {
         if (what === 'propose') return sendJson(res, 200, await proposeFor(id, body.id, String(body.side ?? '')));
         if (what === 'save') return sendJson(res, 200, await saveTracks(id, body));
         if (what === 'draft') return sendJson(res, 200, saveDraft(id, body));
+        if (what === 'delete') { removeRecording(id); return sendJson(res, 200, { ok: true }); }
       }
     }
     if (req.method === 'GET' && url.pathname === '/api/catalogue') return sendJson(res, 200, await catalogue());

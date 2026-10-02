@@ -231,5 +231,5 @@ const Editor = (() => {
   }
 
   addEventListener('resize', () => { if (rec && album) redraw(); });
-  return { open, progress: p => { if (rec && p.id === rec.id && busy) { busy = p.done < p.of ? `Saving ${p.done + 1} of ${p.of}…` : 'Finishing…'; render(); } } };
+  return { open, closeIf: id => { if (rec && rec.id === id) close(); }, progress: p => { if (rec && p.id === rec.id && busy) { busy = p.done < p.of ? `Saving ${p.done + 1} of ${p.of}…` : 'Finishing…'; render(); } } };
 })();

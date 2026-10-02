@@ -172,7 +172,7 @@ function verdict(r) {
 
 async function list() {
   recs = await api('/api/recordings');
-  if (!recs.length) { $('list').textContent = 'None yet.'; return; }
+  if (!recs.length) { $('list').className = 'dim'; $('list').textContent = 'None yet.'; return; }
   $('list').className = '';
   $('list').replaceChildren(...recs.map(r => {
     const d = document.createElement('div'); d.className = 'rec';
@@ -189,7 +189,21 @@ async function list() {
     const done = document.createElement('span'); done.className = saved ? 'ok' : sp ? 'warn' : 'dim';
     const as = sp && `${sp.artist} – ${sp.album}${sp.side ? ', side ' + sp.side : ''}`;
     done.textContent = saved ? `${sp.tracks} tracks saved as ${as}, in ${sp.dir}` : sp ? `Cuts chosen for ${as}; the tracks aren't saved with them yet.` : 'Not split into tracks yet.';
-    b.append(go, done);
+    // A bad recording (fluff on the needle, a skip): take it out and set the same side up to record again.
+    const of = sp && sp.id != null ? { id: sp.id, artist: sp.artist, title: sp.album, side: sp.side } : r.record;
+    const del = document.createElement('button'); del.className = 'plain'; del.textContent = of ? 'Delete and record again' : 'Delete';
+    del.onclick = async () => {
+      if (!confirm(`Delete the recording "${r.name || r.id}"?
+
+It moves to the "deleted" folder in ${st.conf.outDir}, so it can still be got back until you empty that folder.`)) return;
+      try {
+        await api('/api/recordings/' + encodeURIComponent(r.id) + '/delete', {});
+        Editor.closeIf(r.id);
+        await list(); await Catalogue.load();
+        if (of) chooseSide(of, of.side);
+      } catch (e) { alert(e.message); }
+    };
+    b.append(go, del, done);
     d.append(t, m, ul, a, cv, b);
     api('/api/recordings/' + encodeURIComponent(r.id) + '/levels').then(lv => draw(cv, lv)).catch(() => {});
     return d;
