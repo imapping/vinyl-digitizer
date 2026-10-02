@@ -46,3 +46,7 @@ that plays a short made-up side; point `source` at it.
 - `meter.js`: levels, clipping and hum, measured as a side is recorded.
 - `split.js`: proposes where the tracks start and end.
 - `public/`: the page (`index.html`), the track editor (`editor.js`), the collection (`catalogue.js`).
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

@@ -4,6 +4,12 @@
   "description": "Records a record's side from the TimesGate controller's turntable stream and saves it as FLAC",
   "private": true,
   "main": "server.js",
-  "scripts": { "start": "node server.js", "fake-turntable": "node test/fake-turntable.js" },
-  "engines": { "node": ">=20" }
+  "scripts": {
+    "start": "node server.js",
+    "fake-turntable": "node test/fake-turntable.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
 }
