@@ -46,6 +46,15 @@ function findFfmpeg() {
 }
 const FFMPEG = findFfmpeg();
 
+// Trust the certificates this computer trusts (the Windows store), as well as Node's own list.
+// Antivirus that scans web traffic (Norton here) re-signs secure connections with its own
+// certificate, which Windows knows and Node doesn't, so the cover download from Discogs failed
+// with UNABLE_TO_VERIFY_LEAF_SIGNATURE. Needs Node 24.5 or later; older ones carry on as before.
+try {
+  const tls = require('tls');
+  if (tls.setDefaultCACertificates) tls.setDefaultCACertificates([...tls.getCACertificates('default'), ...tls.getCACertificates('system')]);
+} catch (e) { console.log('Couldn\'t load this computer\'s certificates:', e.message); }
+
 // ---------- live updates to the page (server-sent events) ----------
 const watchers = new Set();
 function tell(event, data) {
