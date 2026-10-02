@@ -224,17 +224,25 @@ const fileSafe = v => String(v || '').replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').rep
 const COVER = /^https:\/\/(i|img)\.discogs\.com\//;
 let saving = null;   // the id of the recording being saved
 
-// The record's cover, saved in the album's folder: its path, or null.
+// The record's cover, saved in the album's folder: { file } or { error: why not }. Tried twice.
 async function fetchCover(url, dir) {
-  if (!COVER.test(url || '')) return null;
-  try {
-    const r = await fetch(url, { headers: { 'User-Agent': 'VinylDigitizer/0.1' }, signal: AbortSignal.timeout(20000) });
-    const type = r.headers.get('content-type') || '';
-    if (!r.ok || !/^image\/(jpeg|png)/.test(type)) return null;
-    const file = path.join(dir, type.includes('png') ? 'cover.png' : 'cover.jpg');
-    fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
-    return file;
-  } catch { return null; }
+  if (!url) return { error: 'Discogs has no picture for this record.' };
+  if (!COVER.test(url)) return { error: 'The picture\'s address isn\'t a Discogs one.' };
+  let error;
+  for (let go = 0; go < 2; go++) {
+    if (go) await new Promise(r => setTimeout(r, 2000));
+    try {
+      const r = await fetch(url, { headers: { 'User-Agent': 'VinylDigitizer/0.1' }, signal: AbortSignal.timeout(20000) });
+      const type = r.headers.get('content-type') || '';
+      if (!r.ok) { error = `Discogs answered ${r.status} for the picture.`; continue; }
+      if (!/^image\/(jpeg|png)/.test(type)) { error = `The picture came as ${type || 'an unknown type'}, which can't be embedded.`; continue; }
+      const file = path.join(dir, type.includes('png') ? 'cover.png' : 'cover.jpg');
+      fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+      return { file };
+    } catch (e) { error = `The picture couldn't be downloaded (${e.cause?.code || e.message}).`; }
+  }
+  log('Cover:', error);
+  return { error };
 }
 function runFfmpeg(args) {
   return new Promise((resolve, reject) => {
@@ -274,7 +282,7 @@ async function saveTracks(id, body) {
     const dir = path.join(conf.outDir, 'FLAC', folder), mp3Dir = body.mp3 ? path.join(conf.outDir, 'MP3', folder) : null;
     fs.mkdirSync(dir, { recursive: true });
     if (mp3Dir) fs.mkdirSync(mp3Dir, { recursive: true });
-    const cover = await fetchCover(a.cover, dir);
+    const { file: cover, error: coverError } = await fetchCover(a.cover, dir);
     const width = Math.max(2, ...tracks.map(t => String(t.number || 0).length));
     // Slowing a fast deck's recording down: say the samples were taken more slowly (lower pitch,
     // longer), then resample back to 44.1 kHz with the high-quality resampler.
@@ -297,7 +305,7 @@ async function saveTracks(id, body) {
         path.join(mp3Dir, name.replace(/.flac$/, '.mp3'))]);
       files.push(name);
     }
-    const edit = { album: a, tracks, rpm: rpm || null, corrected: correct, savedAt: new Date().toISOString(), dir, mp3Dir, files, cover: cover && path.basename(cover) };
+    const edit = { album: a, tracks, rpm: rpm || null, corrected: correct, savedAt: new Date().toISOString(), dir, mp3Dir, files, cover: cover ? path.basename(cover) : null, coverError: coverError || null };
     fs.writeFileSync(path.join(rawDir(), id + '.edit.json'), JSON.stringify(edit, null, 2));
     if (typeof body.mp3 === 'boolean' && body.mp3 !== conf.mp3) { conf.mp3 = body.mp3; saveConf(); }
     log(`Saved ${files.length} tracks from "${id}" in ${dir}${mp3Dir ? ', with MP3 copies' : ''}.`);

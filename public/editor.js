@@ -163,7 +163,8 @@ const Editor = (() => {
       h('div', { className: 'row', style: 'margin-top:14px' },
         h('button', { disabled: !!busy, onclick: save }, busy || (saved ? 'Save the tracks again' : 'Save the tracks')),
         h('button', { className: 'plain', onclick: close }, 'Close')),
-      saved ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.mp3Dir ? ` MP3 copies are in ${saved.mp3Dir}.` : '') + (saved.cover ? '' : ' (No cover picture was available.)')) : null);
+      saved ? h('div', { className: 'ok', style: 'margin-top:8px' }, `Saved ${saved.files.length} tracks in ${saved.dir}` + (saved.corrected ? `, speed-corrected from ${saved.rpm} RPM.` : ', not speed-corrected.') + (saved.mp3Dir ? ` MP3 copies are in ${saved.mp3Dir}.` : '') + (saved.cover ? ' The cover picture is in each file.' : '')) : null,
+      saved && !saved.cover ? h('div', { className: 'warn', style: 'margin-top:4px' }, 'No cover picture was added. ' + (saved.coverError || '') + ' Save the tracks again to retry.') : null);
   }
 
   async function save() {
